@@ -1,0 +1,27 @@
+{
+  "description": "Index registry for automated PR verification. Every indexed field in a collection must be registered here.",
+  "collections": {
+    "WebUser": {
+      "model_file": "src/main/java/com/demo/devstandards/model/WebUser.java",
+      "index_initializer_file": "src/main/java/com/demo/devstandards/index/IndexInitializer.java",
+      "index_documentation_file": "docs/INDEX_DOCUMENTATION.md",
+      "fields": {
+        "_id": {
+          "index_name": "_id_",
+          "type": "primary",
+          "unique": true
+        },
+        "email": {
+          "index_name": "idx_email_unique",
+          "type": "ascending",
+          "unique": true
+        },
+        "last_name": {
+          "index_name": "idx_last_name",
+          "type": "ascending",
+          "unique": false
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,214 @@
+###############################################################################
+# PR Checklist Verification Workflow
+###############################################################################
+# This GitHub Actions workflow automates the verification of development
+# standards checklist items on every Pull Request.
+#
+# It specifically enforces:
+# 1. If database fields were added/updated -> indexes must exist
+# 2. Indexes must be added by code (IndexInitializer) or pipeline
+# 3. Indexes must be documented
+#
+# If any check fails, the PR is blocked from merging and the developer
+# is notified with clear instructions on what to fix.
+###############################################################################
+
+name: PR Development Standards Verification
+
+on:
+  pull_request:
+    branches: [ main, master, develop ]
+    types: [ opened, synchronize, reopened ]
+    paths:
+      - 'src/main/java/**/model/**'
+      - 'src/main/java/**/index/**'
+      - 'docs/INDEX_DOCUMENTATION.md'
+      - 'scripts/index-registry.json'
+
+# Ensure only one verification runs per PR at a time
+concurrency:
+  group: pr-verification-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  # ===========================================================================
+  # Job 1: Build and Compile Check
+  # ===========================================================================
+  build:
+    name: Build & Compile
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for diff comparison
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Build with Maven
+        run: mvn compile -B -q
+
+  # ===========================================================================
+  # Job 2: Index Verification (Core Checklist Items)
+  # ===========================================================================
+  index-verification:
+    name: Index Verification
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Checkout PR code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Need full history for diff
+
+      - name: Fetch base branch
+        run: git fetch origin ${{ github.event.pull_request.base.ref }} --depth=1
+
+      - name: Run Index Verification Script
+        id: verify
+        env:
+          GITHUB_BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          chmod +x scripts/verify-indexes.sh
+          # Capture output for the PR comment
+          set +e
+          OUTPUT=$(bash scripts/verify-indexes.sh 2>&1)
+          EXIT_CODE=$?
+          set -e
+          echo "$OUTPUT"
+          # Save output to file for comment step
+          echo "$OUTPUT" > /tmp/verification-output.txt
+          echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
+          exit $EXIT_CODE
+
+      - name: Comment on PR (Success)
+        if: success()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const output = fs.readFileSync('/tmp/verification-output.txt', 'utf8');
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `## ✅ Index Verification Passed\n\nAll development standards checks for database indexes have passed.\n\n<details><summary>Verification Details</summary>\n\n\`\`\`\n${output}\n\`\`\`\n\n</details>`
+            });
+
+      - name: Comment on PR (Failure)
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const output = fs.readFileSync('/tmp/verification-output.txt', 'utf8');
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `## ❌ Index Verification Failed\n\nOne or more development standards checks have failed. **This PR cannot be merged until all issues are resolved.**\n\n### What to fix:\nWhen adding new fields to a collection, you must:\n1. Add \`@Indexed\` annotation on the field in the model class\n2. Add programmatic index creation in \`IndexInitializer.java\`\n3. Document the index in \`docs/INDEX_DOCUMENTATION.md\`\n4. Register the index in \`scripts/index-registry.json\`\n\nRefer to \`.github/copilot-instructions.md\` section **"INDEX REQUIREMENT"** for detailed instructions.\n\n<details><summary>Full Verification Output</summary>\n\n\`\`\`\n${output}\n\`\`\`\n\n</details>`
+            });
+
+  # ===========================================================================
+  # Job 3: Static Analysis Checks
+  # ===========================================================================
+  static-analysis:
+    name: Static Analysis
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Check for hardcoded values
+        run: |
+          echo "--- Checking for hardcoded values in Java source ---"
+          ISSUES=0
+          # Check for hardcoded IP addresses
+          if grep -rn '[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}' src/main/java/ --include="*.java" | grep -v '127.0.0.1' | grep -v '0.0.0.0' | grep -v 'test' | grep -v '//' ; then
+            echo "WARNING: Possible hardcoded IP addresses found"
+            ISSUES=$((ISSUES + 1))
+          fi
+          # Check for hardcoded passwords/secrets patterns
+          if grep -rniE '(password|secret|apikey|api_key)\s*=\s*"[^$]' src/main/java/ --include="*.java" | grep -v 'test' | grep -v '//' ; then
+            echo "FAIL: Possible hardcoded secrets found"
+            exit 1
+          fi
+          echo "Static analysis checks passed."
+
+      - name: Check for dead code indicators
+        run: |
+          echo "--- Checking for dead code indicators ---"
+          # Check for common dead code patterns
+          DEAD_CODE_FOUND=false
+          # Commented-out code blocks (3+ consecutive commented lines with code patterns)
+          if grep -rn '^\s*//.*[;{}()]' src/main/java/ --include="*.java" | head -20 | grep -c '.' > /tmp/commented_lines; then
+            COUNT=$(cat /tmp/commented_lines)
+            if [ "$COUNT" -gt 10 ]; then
+              echo "WARNING: Found $COUNT lines of possibly commented-out code"
+            fi
+          fi
+          echo "Dead code check completed."
+
+  # ===========================================================================
+  # Job 4: Unit Test Execution
+  # ===========================================================================
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Run unit tests
+        run: mvn test -B
+
+  # ===========================================================================
+  # Final Gate: All checks must pass
+  # ===========================================================================
+  pr-gate:
+    name: PR Merge Gate
+    runs-on: ubuntu-latest
+    needs: [index-verification, static-analysis, unit-tests]
+    if: always()
+    steps:
+      - name: Evaluate results
+        run: |
+          echo "============================================="
+          echo " PR MERGE GATE - Final Decision"
+          echo "============================================="
+          if [ "${{ needs.index-verification.result }}" != "success" ]; then
+            echo "BLOCKED: Index verification failed"
+            exit 1
+          fi
+          if [ "${{ needs.static-analysis.result }}" != "success" ]; then
+            echo "BLOCKED: Static analysis failed"
+            exit 1
+          fi
+          if [ "${{ needs.unit-tests.result }}" != "success" ]; then
+            echo "BLOCKED: Unit tests failed"
+            exit 1
+          fi
+          echo "All checks passed. PR is approved for merge."
