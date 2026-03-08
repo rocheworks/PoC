@@ -2,6 +2,7 @@ package com.demo.devstandards.config;
 
 import com.mongodb.ConnectionString;
 import com.mongodb.MongoClientSettings;
+import com.mongodb.MongoCredential;
 import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoClients;
 import org.springframework.beans.factory.annotation.Value;
@@ -21,6 +22,13 @@ import javax.net.ssl.TrustManagerFactory;
 /**
  * Configuration class for AWS DocumentDB (MongoDB-compatible) connectivity.
  * Uses TLS/SSL with a PEM certificate bundle for secure connections.
+ * Authenticates via AWS IAM (MONGODB-AWS mechanism).
+ *
+ * Prerequisites:
+ * - SSH tunnel to DocumentDB must be running (localhost:27017)
+ * - AWS credentials must be set as environment variables:
+ *   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN
+ * - Run saml2aws login before starting the application
  */
 @Configuration
 public class DocDbMongoConfig {
@@ -35,8 +43,13 @@ public class DocDbMongoConfig {
     public MongoClient mongoClient() throws Exception {
         SSLContext sslContext = buildSslContextFromPem(caFilePath);
 
+        // MONGODB-AWS credential: the driver reads AWS_ACCESS_KEY_ID,
+        // AWS_SECRET_ACCESS_KEY, and AWS_SESSION_TOKEN from environment variables
+        MongoCredential credential = MongoCredential.createAwsCredential(null, null);
+
         MongoClientSettings settings = MongoClientSettings.builder()
                 .applyConnectionString(new ConnectionString(mongoUri))
+                .credential(credential)
                 .applyToSslSettings(ssl -> {
                     ssl.enabled(true);
                     ssl.invalidHostNameAllowed(true);
